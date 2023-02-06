@@ -390,12 +390,19 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
+        eprintln!(
+            "chromiumoxide: dropping browser, has_child: {}",
+            self.child.is_some()
+        );
         if let Some(child) = self.child.as_mut() {
-            if let Ok(Some(_)) = child.try_wait() {
+            if let Ok(Some(_)) = dbg!(child.try_wait()) {
+                eprintln!("chromiumoxide: No need to exit");
                 // already exited, do nothing. Usually occurs after using the method close.
                 // If there is a method to detect whether the child handle is still available, it should be used instead of try_wait.
             } else {
+                eprintln!("chromiumoxide: Need to exit");
                 child.kill_sync().expect("!kill");
+                eprintln!("chromiumoxide: Killed");
                 // important to wait other wise kill will leave zombie process in system
                 // this is blocking call and we dont have any choice in the drop function
                 // one way is to do something like
@@ -407,6 +414,7 @@ impl Drop for Browser {
                 // or call kill() and then repeatedly calling try_wait() until it return true
                 // if developer wants true asynchronous version
                 child.wait_sync().expect("!wait");
+                eprintln!("chromiumoxide: Waited");
             }
         }
     }
