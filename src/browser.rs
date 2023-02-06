@@ -83,21 +83,52 @@ impl Browser {
         // launch a new chromium instance
         let mut child = config.launch()?;
 
-        let dur = config.launch_timeout;
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "async-std-runtime")] {
-                let timeout_fut = Box::pin(async_std::task::sleep(dur));
-            } else if #[cfg(feature = "tokio-runtime")] {
-                let timeout_fut = tokio::time::sleep(dur);
-            } else {
-                panic!("missing chromiumoxide runtime: enable `async-std-runtime` or `tokio-runtime`")
+        /// Faillible initialization to run once the child process is created.
+        ///
+        /// All faillible calls must be executed inside this function. This ensures that all
+        /// errors are caught and that the child process is properly cleaned-up.
+        async fn with_child(
+            config: &BrowserConfig,
+            child: &mut child,
+        ) -> Result<Connection<CdpEventMessage>> {
+            let dur = config.launch_timeout;
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "async-std-runtime")] {
+                    let timeout_fut = Box::pin(async_std::task::sleep(dur));
+                } else if #[cfg(feature = "tokio-runtime")] {
+                    let timeout_fut = tokio::time::sleep(dur);
+                } else {
+                    panic!("missing chromiumoxide runtime: enable `async-std-runtime` or `tokio-runtime`")
+                }
+            };
+            // extract the ws:
+            let debug_ws_url = ws_url_from_output(child, timeout_fut).await?;
+            let conn = Connection::<CdpEventMessage>::connect(&debug_ws_url).await?;
+            Ok(conn)
+        }
+
+        let conn = match with_child(&config, &mut child).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                // An initialization error occured, clean up the process
+                eprintln!("chromium_oxide: launch_wait");
+                if let Ok(Some(_)) = dbg!(child.try_wait()) {
+                    eprintln!("chromium_oxide: killed already");
+                    // already exited, do nothing, may happen if the browser crashed
+                } else {
+                    // the process is still alive, kill it and wait for exit (avoid zombie processes)
+                    eprintln!("chromium_oxide: must kill");
+                    child.kill().await.expect("!kill");
+                    eprintln!("chromium_oxide: must wait");
+                    child.wait().await.expect("!wait");
+                    eprintln!("chromium_oxide: cleaned-up");
+                }
+                return Err(e);
             }
         };
 
-        // extract the ws:
-        let debug_ws_url = ws_url_from_output(&mut child, timeout_fut).await?;
-
-        let conn = Connection::<CdpEventMessage>::connect(&debug_ws_url).await?;
+        // Only infaillible calls are allowed after this point to avoid clean-up issues with the
+        // child process.
 
         let (tx, rx) = channel(1);
 
